@@ -1,0 +1,185 @@
+version: '3.8'
+
+services:
+  # ============== API服务 ==============
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: inference
+    image: multimodal-llm:inference
+    container_name: multimodal-api
+    ports:
+      - "8000:8000"
+    environment:
+      - MODEL_PATH=/models
+      - MODEL_NAME=multimodal-llm
+      - TENSOR_PARALLEL_SIZE=1
+      - GPU_MEMORY_UTILIZATION=0.9
+      - MAX_MODEL_LEN=4096
+    volumes:
+      - ./models:/models
+      - ./logs:/app/logs
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    networks:
+      - multimodal-network
+    restart: unless-stopped
+
+  # ============== 训练服务 ==============
+  training:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: training
+    image: multimodal-llm:training
+    container_name: multimodal-training
+    environment:
+      - PYTHONPATH=/app
+      - WANDB_PROJECT=multimodal-llm
+      - WANDB_API_KEY=${WANDB_API_KEY}
+    volumes:
+      - ./training:/app/training
+      - ./data_pipeline:/app/data_pipeline
+      - ./model_architecture:/app/model_architecture
+      - ./data:/data
+      - ./models:/models
+      - ./logs:/app/logs
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    networks:
+      - multimodal-network
+    command: ["/bin/bash"]
+
+  # ============== 数据处理服务 ==============
+  data-pipeline:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: data-pipeline
+    image: multimodal-llm:data-pipeline
+    container_name: multimodal-data-pipeline
+    environment:
+      - PYTHONPATH=/app
+      - DATA_DIR=/data
+    volumes:
+      - ./data_pipeline:/app/data_pipeline
+      - ./data:/data
+      - ./logs:/app/logs
+    networks:
+      - multimodal-network
+    command: ["/bin/bash"]
+
+  # ============== MinIO对象存储 ==============
+  minio:
+    image: minio/minio:latest
+    container_name: multimodal-minio
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      - MINIO_ROOT_USER=minioadmin
+      - MINIO_ROOT_PASSWORD=minioadmin
+    volumes:
+      - minio-data:/data
+    command: server /data --console-address ":9001"
+    networks:
+      - multimodal-network
+    restart: unless-stopped
+
+  # ============== PostgreSQL数据库 ==============
+  postgres:
+    image: postgres:15
+    container_name: multimodal-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_DB=multimodal_db
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - multimodal-network
+    restart: unless-stopped
+
+  # ============== Redis缓存 ==============
+  redis:
+    image: redis:7-alpine
+    container_name: multimodal-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    networks:
+      - multimodal-network
+    restart: unless-stopped
+
+  # ============== Prometheus监控 ==============
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: multimodal-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus-data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+    networks:
+      - multimodal-network
+    restart: unless-stopped
+
+  # ============== Grafana可视化 ==============
+  grafana:
+    image: grafana/grafana:latest
+    container_name: multimodal-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./monitoring/grafana/dashboards:/etc/grafana/provisioning/dashboards
+      - ./monitoring/grafana/datasources:/etc/grafana/provisioning/datasources
+    networks:
+      - multimodal-network
+    restart: unless-stopped
+
+# ============== 网络配置 ==============
+networks:
+  multimodal-network:
+    driver: bridge
+    name: multimodal-network
+
+# ============== 数据卷配置 ==============
+volumes:
+  minio-data:
+    name: multimodal-minio-data
+  postgres-data:
+    name: multimodal-postgres-data
+  redis-data:
+    name: multimodal-redis-data
+  prometheus-data:
+    name: multimodal-prometheus-data
+  grafana-data:
+    name: multimodal-grafana-data
